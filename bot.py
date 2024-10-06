@@ -4,17 +4,30 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from collections import deque
 from dotenv import load_dotenv
+from datetime import datetime, timedelta, time
+import pytz
+
+# Загружаем переменные из .env файла
 load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Загружаем переменные из окружения
+# Загружаем переменные окружения
 TOKEN = os.getenv('TOKEN')
 ALLOWED_USER_ID = int(os.getenv('ALLOWED_USER_ID'))
 SOURCE_CHANNEL_ID = int(os.getenv('SOURCE_CHANNEL_ID'))
 TARGET_CHANNEL_ID = int(os.getenv('TARGET_CHANNEL_ID'))
+
+# Загружаем настройки для ежедневной отправки
+DAILY_IMAGE_COUNT = int(os.getenv('DAILY_IMAGE_COUNT', 10))  # Количество изображений по умолчанию 10
+TIMEZONE = os.getenv('TIMEZONE', 'Europe/Moscow')  # Часовой пояс по умолчанию
+DAILY_SEND_HOUR = int(os.getenv('DAILY_SEND_HOUR', 10))  # Время отправки - 10 часов по умолчанию
+DAILY_SEND_MINUTE = int(os.getenv('DAILY_SEND_MINUTE', 0))  # Минуты отправки - 0 по умолчанию
+
+# Настраиваем часовой пояс
+tz = pytz.timezone(TIMEZONE)
 
 # Очередь для хранения сообщений с изображениями (храним file_id, caption и message_id)
 image_queue = deque()
@@ -40,7 +53,8 @@ async def start(update: Update, context) -> None:
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     start_message = (
-        "Привет! Я бот для обработки изображений между каналами.\n\n"
+        f"Привет! Я бот для обработки изображений между каналами.\n\n"
+        f"Каждый день я автоматически отправляю {DAILY_IMAGE_COUNT} изображений в {DAILY_SEND_HOUR:02}:{DAILY_SEND_MINUTE:02} по часовому поясу {TIMEZONE}.\n\n"
         "Вот список доступных команд:\n"
         "/start - Показать меню с выбором количества изображений для отправки.\n"
         "/send <количество> - Отправить указанное количество изображений из исходного канала в целевой. Если число не указано, отправляется одно изображение.\n"
@@ -125,6 +139,11 @@ async def send_command(update: Update, context) -> None:
         await update.message.reply_text("Пожалуйста, укажите правильное число.")
         logger.warning("Некорректный ввод числа при команде /send.")
 
+async def scheduled_send_images(context) -> None:
+    """Функция для плановой отправки изображений"""
+    logger.info("Запланированная отправка изображений началась.")
+    await send_images(context, DAILY_IMAGE_COUNT)  # Отправляем количество изображений из переменной
+
 def main():
     # Создаем приложение с вашим токеном
     app = ApplicationBuilder().token(TOKEN).build()
@@ -134,6 +153,16 @@ def main():
     app.add_handler(CommandHandler("send", send_command))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.PHOTO & filters.Chat(SOURCE_CHANNEL_ID), handle_new_image))
+
+    # Планирование отправки изображений
+    job_queue = app.job_queue
+
+    # Планирование отправки изображений через 1 минуту после запуска бота для тестирования
+    # start_time = datetime.now(tz) + timedelta(minutes=1)  # Через 1 минуту от текущего времени в заданном часовом поясе
+    # job_queue.run_once(scheduled_send_images, when=start_time)
+
+    # Для ежедневного запуска в заданное время по часовому поясу:
+    job_queue.run_daily(scheduled_send_images, time(hour=DAILY_SEND_HOUR, minute=DAILY_SEND_MINUTE, tzinfo=tz))
 
     # Запускаем бота
     logger.info("Бот запущен.")
