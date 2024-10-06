@@ -16,6 +16,9 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 # Ваш токен API от BotFather (рекомендуется хранить токен в переменных окружения)
 TOKEN = os.getenv('BOT_TOKEN')
 
+# ID разрешенного пользователя (ваш user_id)
+ALLOWED_USER_ID = 138126217
+
 # ID канала, откуда бот будет обрабатывать изображения
 SOURCE_CHANNEL_ID = -1002470156657
 # ID канала, куда бот будет отправлять новые сообщения
@@ -24,8 +27,18 @@ TARGET_CHANNEL_ID = -1002482136052
 # Очередь для хранения сообщений с изображениями (храним file_id, caption и message_id)
 image_queue = deque()
 
+# Функция для проверки, имеет ли пользователь доступ к боту
+async def is_user_allowed(update: Update) -> bool:
+    """Проверка доступа по user_id"""
+    user_id = update.message.from_user.id if update.message else update.callback_query.from_user.id
+    return user_id == ALLOWED_USER_ID
+
 async def start(update: Update, context) -> None:
     """Отправляем меню с опциями при команде /start"""
+    if not await is_user_allowed(update):
+        await update.message.reply_text("У вас нет доступа к этому боту.")
+        return
+
     keyboard = [
         [InlineKeyboardButton("Отправить 1", callback_data='1')],
         [InlineKeyboardButton("Отправить 3", callback_data='3')],
@@ -34,7 +47,6 @@ async def start(update: Update, context) -> None:
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Стартовое сообщение с описанием команд
     start_message = (
         "Привет! Я бот для обработки изображений между каналами.\n\n"
         "Вот список доступных команд:\n"
@@ -47,6 +59,10 @@ async def start(update: Update, context) -> None:
 
 async def button(update: Update, context) -> None:
     """Обработка нажатий кнопок"""
+    if not await is_user_allowed(update):
+        await update.callback_query.answer("У вас нет доступа к этому боту.", show_alert=True)
+        return
+
     query = update.callback_query
     await query.answer()
     count = int(query.data)  # Количество изображений для отправки
@@ -55,7 +71,6 @@ async def button(update: Update, context) -> None:
 async def send_images(context, count: int) -> None:
     """Отправка изображений из очереди в целевой канал как новые сообщения"""
     if not image_queue:
-        await context.bot.send_message(chat_id=TARGET_CHANNEL_ID, text="Очередь пуста.")
         return
 
     image_count = 0
@@ -100,6 +115,10 @@ async def handle_new_image(update: Update, context) -> None:
 
 async def send_command(update: Update, context) -> None:
     """Обработка команды /send"""
+    if not await is_user_allowed(update):
+        await update.message.reply_text("У вас нет доступа к этому боту.")
+        return
+
     try:
         count = int(context.args[0]) if context.args else 1  # Если указано число, используем его, иначе отправляем одно изображение
         await send_images(context, count)
