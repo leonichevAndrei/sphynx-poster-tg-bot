@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 # Загружаем переменные окружения
 load_dotenv()
 
-API_TOKEN = os.getenv('BOT_TOKEN')
+API_TOKEN = os.getenv('TOKEN')
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())

@@ -10,19 +10,11 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Установим уровень логирования для httpx на WARNING, чтобы отключить сообщения INFO
-logging.getLogger('httpx').setLevel(logging.WARNING)
-
-# Ваш токен API от BotFather (рекомендуется хранить токен в переменных окружения)
-TOKEN = os.getenv('BOT_TOKEN')
-
-# ID разрешенного пользователя (ваш user_id)
-ALLOWED_USER_ID = 138126217
-
-# ID канала, откуда бот будет обрабатывать изображения
-SOURCE_CHANNEL_ID = -1002470156657
-# ID канала, куда бот будет отправлять новые сообщения
-TARGET_CHANNEL_ID = -1002482136052
+# Загружаем переменные из окружения
+TOKEN = os.getenv('TOKEN')
+ALLOWED_USER_ID = int(os.getenv('ALLOWED_USER_ID'))
+SOURCE_CHANNEL_ID = int(os.getenv('SOURCE_CHANNEL_ID'))
+TARGET_CHANNEL_ID = int(os.getenv('TARGET_CHANNEL_ID'))
 
 # Очередь для хранения сообщений с изображениями (храним file_id, caption и message_id)
 image_queue = deque()
@@ -71,6 +63,7 @@ async def button(update: Update, context) -> None:
 async def send_images(context, count: int) -> None:
     """Отправка изображений из очереди в целевой канал как новые сообщения"""
     if not image_queue:
+        logger.info("Очередь изображений пуста.")
         return
 
     image_count = 0
@@ -81,6 +74,9 @@ async def send_images(context, count: int) -> None:
         message_id = image_data['message_id']
 
         try:
+            # Лог перед удалением изображения
+            logger.info(f"Попытка удалить изображение с ID {message_id} из исходного канала.")
+            
             # Сначала пытаемся удалить изображение из исходного канала
             await context.bot.delete_message(chat_id=SOURCE_CHANNEL_ID, message_id=message_id)
             logger.info(f"Изображение с ID {message_id} успешно удалено из исходного канала.")
@@ -90,6 +86,9 @@ async def send_images(context, count: int) -> None:
             continue  # Переходим к следующему изображению
 
         try:
+            # Лог перед отправкой изображения
+            logger.info(f"Попытка отправить изображение с ID {message_id} в целевой канал.")
+            
             # Отправляем фото в целевой канал как новое сообщение
             await context.bot.send_photo(
                 chat_id=TARGET_CHANNEL_ID,
@@ -138,7 +137,7 @@ def main():
 
     # Запускаем бота
     logger.info("Бот запущен.")
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES, read_timeout=10, write_timeout=10)
 
 if __name__ == '__main__':
     main()
