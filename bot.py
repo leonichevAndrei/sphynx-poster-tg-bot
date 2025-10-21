@@ -1,172 +1,191 @@
+"""
+Telegram bot that relays photos from a source channel to a target channel.
+Features:
+- Collects incoming photos from a source channel into a FIFO queue
+- Sends N photos on demand (/send) or on a daily schedule (job queue)
+- Deletes the original message in the source channel after enqueueing, then posts as a new message in the target channel
+"""
+
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from collections import deque
-from dotenv import load_dotenv
-from datetime import datetime, timedelta, time
-import pytz
+from datetime import time
 
-# Загружаем переменные из .env файла
+import pytz
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
+
+# Load environment variables
 load_dotenv()
 
-# Настройка логирования
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Загружаем переменные окружения
-TOKEN = os.getenv('TOKEN')
-ALLOWED_USER_ID = int(os.getenv('ALLOWED_USER_ID'))
-SOURCE_CHANNEL_ID = int(os.getenv('SOURCE_CHANNEL_ID'))
-TARGET_CHANNEL_ID = int(os.getenv('TARGET_CHANNEL_ID'))
+# Environment variables (align with .env.example)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))          # user ID allowed to interact with commands
+SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID", "0"))      # channel ID to listen for new photos
+TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0"))      # channel ID to post photos to
 
-# Загружаем настройки для ежедневной отправки
-DAILY_IMAGE_COUNT = int(os.getenv('DAILY_IMAGE_COUNT', 10))  # Количество изображений по умолчанию 10
-TIMEZONE = os.getenv('TIMEZONE', 'Europe/Moscow')  # Часовой пояс по умолчанию
-DAILY_SEND_HOUR = int(os.getenv('DAILY_SEND_HOUR', 10))  # Время отправки - 10 часов по умолчанию
-DAILY_SEND_MINUTE = int(os.getenv('DAILY_SEND_MINUTE', 0))  # Минуты отправки - 0 по умолчанию
+# Daily schedule settings
+POSTS_PER_DAY = int(os.getenv("POSTS_PER_DAY", "10"))             # default: 10 images per day
+TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")                 # default timezone
+SEND_HOUR = int(os.getenv("DAILY_SEND_HOUR", "10"))               # default: 10:00
+SEND_MINUTE = int(os.getenv("DAILY_SEND_MINUTE", "0"))            # default: 10:00
 
-# Настраиваем часовой пояс
+# Timezone object
 tz = pytz.timezone(TIMEZONE)
 
-# Очередь для хранения сообщений с изображениями (храним file_id, caption и message_id)
-image_queue = deque()
+# FIFO queue to store incoming images: file_id, caption, message_id
+image_queue: deque[dict] = deque()
 
-# Функция для проверки, имеет ли пользователь доступ к боту
+
 async def is_user_allowed(update: Update) -> bool:
-    """Проверка доступа по user_id"""
-    user_id = update.message.from_user.id if update.message else update.callback_query.from_user.id
-    return user_id == ALLOWED_USER_ID
+    """Check if the user is allowed to use the bot (by user_id)."""
+    user_id = (
+        update.effective_user.id
+        if update.effective_user
+        else 0
+    )
+    return ALLOWED_USER_ID == 0 or user_id == ALLOWED_USER_ID
 
-async def start(update: Update, context) -> None:
-    """Отправляем меню с опциями при команде /start"""
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a small menu with quick actions on /start."""
     if not await is_user_allowed(update):
-        await update.message.reply_text("У вас нет доступа к этому боту.")
+        if update.effective_message:
+            await update.effective_message.reply_text("You are not allowed to use this bot.")
         return
 
     keyboard = [
-        [InlineKeyboardButton("Отправить 1", callback_data='1')],
-        [InlineKeyboardButton("Отправить 3", callback_data='3')],
-        [InlineKeyboardButton("Отправить 5", callback_data='5')],
-        [InlineKeyboardButton("Отправить 10", callback_data='10')]
+        [InlineKeyboardButton("Send 1", callback_data="1")],
+        [InlineKeyboardButton("Send 3", callback_data="3")],
+        [InlineKeyboardButton("Send 5", callback_data="5")],
+        [InlineKeyboardButton("Send 10", callback_data="10")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    start_message = (
-        f"Привет! Я бот для обработки изображений между каналами.\n\n"
-        f"Каждый день я автоматически отправляю {DAILY_IMAGE_COUNT} изображений в {DAILY_SEND_HOUR:02}:{DAILY_SEND_MINUTE:02} по часовому поясу {TIMEZONE}.\n\n"
-        "Вот список доступных команд:\n"
-        "/start - Показать меню с выбором количества изображений для отправки.\n"
-        "/send <количество> - Отправить указанное количество изображений из исходного канала в целевой. Если число не указано, отправляется одно изображение.\n"
-        "Пример: /send 3 - отправляет 3 изображения.\n"
+    text = (
+        "Hi! This bot relays images from a source channel to a target channel.\n\n"
+        f"Daily it sends {POSTS_PER_DAY} images at {SEND_HOUR:02}:{SEND_MINUTE:02} ({TIMEZONE}).\n\n"
+        "Commands:\n"
+        "/start — show menu\n"
+        "/send <n> — send <n> images from queue (default: 1)\n"
+        "Example: /send 3\n"
     )
+    await update.effective_message.reply_text(text, reply_markup=reply_markup)
 
-    await update.message.reply_text(start_message, reply_markup=reply_markup)
 
-async def button(update: Update, context) -> None:
-    """Обработка нажатий кнопок"""
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline keyboard button clicks."""
     if not await is_user_allowed(update):
-        await update.callback_query.answer("У вас нет доступа к этому боту.", show_alert=True)
+        if update.callback_query:
+            await update.callback_query.answer("Not allowed.", show_alert=True)
         return
 
     query = update.callback_query
     await query.answer()
-    count = int(query.data)  # Количество изображений для отправки
+    count = int(query.data)
     await send_images(context, count)
 
-async def send_images(context, count: int) -> None:
-    """Отправка изображений из очереди в целевой канал как новые сообщения"""
+
+async def send_images(context: ContextTypes.DEFAULT_TYPE, count: int) -> None:
+    """Send up to <count> images from queue to target channel, deleting originals in source channel."""
     if not image_queue:
-        logger.info("Очередь изображений пуста.")
+        logger.info("Image queue is empty.")
         return
 
-    image_count = 0
-    while image_queue and image_count < count:
-        image_data = image_queue.popleft()  # Получаем данные старейшего изображения (file_id, caption и message_id)
-        file_id = image_data['file_id']
-        caption = image_data.get('caption', '')  # Обработка возможного отсутствия подписи
-        message_id = image_data['message_id']
+    sent = 0
+    while image_queue and sent < count:
+        image_data = image_queue.popleft()
+        file_id = image_data["file_id"]
+        caption = image_data.get("caption") or ""
+        message_id = image_data["message_id"]
 
+        # Try to delete original message in source channel
         try:
-            # Лог перед удалением изображения
-            logger.info(f"Попытка удалить изображение с ID {message_id} из исходного канала.")
-            
-            # Сначала пытаемся удалить изображение из исходного канала
+            logger.info("Deleting original message %s from source channel %s", message_id, SOURCE_CHANNEL_ID)
             await context.bot.delete_message(chat_id=SOURCE_CHANNEL_ID, message_id=message_id)
-            logger.info(f"Изображение с ID {message_id} успешно удалено из исходного канала.")
         except Exception as e:
-            # Если изображение не удалось удалить (например, его уже нет), пропускаем его
-            logger.warning(f"Ошибка при удалении изображения с ID {message_id}: {e}")
-            continue  # Переходим к следующему изображению
+            logger.warning("Failed to delete source message %s: %s", message_id, e)
+            # Continue anyway (still try to send to target)
 
+        # Send as a new photo to the target channel
         try:
-            # Лог перед отправкой изображения
-            logger.info(f"Попытка отправить изображение с ID {message_id} в целевой канал.")
-            
-            # Отправляем фото в целевой канал как новое сообщение
-            await context.bot.send_photo(
-                chat_id=TARGET_CHANNEL_ID,
-                photo=file_id,  # Используем сохранённый file_id изображения
-                caption=caption  # Подпись, если есть
-            )
-            image_count += 1
-            logger.info(f"Изображение с ID {message_id} было успешно отправлено.")
+            logger.info("Sending image %s to target channel %s", message_id, TARGET_CHANNEL_ID)
+            await context.bot.send_photo(chat_id=TARGET_CHANNEL_ID, photo=file_id, caption=caption)
+            sent += 1
         except Exception as e:
-            logger.error(f"Ошибка при отправке изображения с ID {message_id}: {e}")
+            logger.error("Failed to send image %s: %s", message_id, e)
 
-async def handle_new_image(update: Update, context) -> None:
-    """Обработка новых сообщений с изображениями"""
-    if update.channel_post and update.channel_post.chat_id == SOURCE_CHANNEL_ID and update.channel_post.photo:
-        # Сохраняем file_id самого большого фото, caption (если есть) и message_id для удаления
-        image_data = {
-            'file_id': update.channel_post.photo[-1].file_id,  # Наибольшее разрешение фото
-            'caption': update.channel_post.caption,  # Возможная подпись
-            'message_id': update.channel_post.message_id  # ID сообщения для последующего удаления
-        }
-        image_queue.append(image_data)
-        logger.info(f"Изображение с ID {update.channel_post.message_id} было добавлено в очередь.")
 
-async def send_command(update: Update, context) -> None:
-    """Обработка команды /send"""
+async def handle_new_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle new photos in the source channel: enqueue file_id, caption, message_id."""
+    channel_post = update.channel_post
+    if not channel_post:
+        return
+
+    if channel_post.chat_id == SOURCE_CHANNEL_ID and channel_post.photo:
+        image_queue.append(
+            {
+                "file_id": channel_post.photo[-1].file_id,  # largest size
+                "caption": channel_post.caption,
+                "message_id": channel_post.message_id,
+            }
+        )
+        logger.info("Enqueued image from message %s", channel_post.message_id)
+
+
+async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /send <n>."""
     if not await is_user_allowed(update):
-        await update.message.reply_text("У вас нет доступа к этому боту.")
+        await update.effective_message.reply_text("You are not allowed to use this bot.")
         return
 
     try:
-        count = int(context.args[0]) if context.args else 1  # Если указано число, используем его, иначе отправляем одно изображение
-        await send_images(context, count)
+        n = int(context.args[0]) if context.args else 1
+        await send_images(context, n)
     except ValueError:
-        await update.message.reply_text("Пожалуйста, укажите правильное число.")
-        logger.warning("Некорректный ввод числа при команде /send.")
+        await update.effective_message.reply_text("Please provide a valid number (e.g., /send 3).")
+        logger.warning("Invalid number in /send command.")
 
-async def scheduled_send_images(context) -> None:
-    """Функция для плановой отправки изображений"""
-    logger.info("Запланированная отправка изображений началась.")
-    await send_images(context, DAILY_IMAGE_COUNT)  # Отправляем количество изображений из переменной
 
-def main():
-    # Создаем приложение с вашим токеном
-    app = ApplicationBuilder().token(TOKEN).build()
+async def scheduled_send_images(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Job: send N images daily at the configured time."""
+    logger.info("Scheduled job started: sending %s images", POSTS_PER_DAY)
+    await send_images(context, POSTS_PER_DAY)
 
-    # Добавляем обработчики
+
+def main() -> None:
+    # Build application
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("send", send_command))
-    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(CallbackQueryHandler(on_button))
+
+    # Listen to photos posted in the source channel
     app.add_handler(MessageHandler(filters.PHOTO & filters.Chat(SOURCE_CHANNEL_ID), handle_new_image))
 
-    # Планирование отправки изображений
-    job_queue = app.job_queue
+    # Daily job
+    app.job_queue.run_daily(
+        scheduled_send_images,
+        time(timezone=tz, hour=SEND_HOUR, minute=SEND_MINUTE),
+    )
 
-    # Планирование отправки изображений через 1 минуту после запуска бота для тестирования
-    # start_time = datetime.now(tz) + timedelta(minutes=1)  # Через 1 минуту от текущего времени в заданном часовом поясе
-    # job_queue.run_once(scheduled_send_images, when=start_time)
-
-    # Для ежедневного запуска в заданное время по часовому поясу:
-    job_queue.run_daily(scheduled_send_images, time(hour=DAILY_SEND_HOUR, minute=DAILY_SEND_MINUTE, tzinfo=tz))
-
-    # Запускаем бота
-    logger.info("Бот запущен.")
+    logger.info("Bot started (polling).")
     app.run_polling(allowed_updates=Update.ALL_TYPES, read_timeout=10, write_timeout=10)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
